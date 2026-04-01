@@ -1,0 +1,11 @@
+{
+  "name": "vcode-query-site",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Verification code query site for a self-hosted mail gateway",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  }
+}

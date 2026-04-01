@@ -1,0 +1,9 @@
+{
+  "name": "vcode-query-site",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-04-02",
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS"
+  }
+}
