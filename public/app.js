@@ -23,12 +23,57 @@ function setLoading(loading) {
   submitButton.textContent = loading ? "查询中..." : "立即查询";
 }
 
+function formatShanghaiDate(date) {
+  return new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(date);
+}
+
+function formatReceivedTime(value) {
+  if (!value) {
+    return "最新邮件";
+  }
+
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    const naiveMatch = trimmed.match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/);
+    if (naiveMatch) {
+      const [, year, month, day, hour, minute, second] = naiveMatch;
+      const utcDate = new Date(
+        Date.UTC(
+          Number(year),
+          Number(month) - 1,
+          Number(day),
+          Number(hour),
+          Number(minute),
+          Number(second)
+        )
+      );
+      return formatShanghaiDate(utcDate);
+    }
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+
+  return formatShanghaiDate(date);
+}
+
 function showResult(payload) {
   resultCard.classList.remove("is-hidden");
   resultCode.textContent = payload.code || "------";
   resultSubject.textContent = payload.latestEmail?.subject || "无主题";
   resultFrom.textContent = payload.latestEmail?.from || "未知发件人";
-  resultTime.textContent = payload.latestEmail?.receivedAt || "最新邮件";
+  resultTime.textContent = formatReceivedTime(payload.latestEmail?.receivedAt);
   helperCopyDefault.classList.add("is-hidden-inline");
   helperCopySuccess.classList.remove("is-hidden-inline");
 }
