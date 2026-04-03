@@ -51,10 +51,12 @@
 
 本项目使用以下环境变量：
 
+- `MAIL_GATEWAY_ACCOUNTS`
+  邮箱中转站登录账号列表，JSON 数组格式，支持多个账号
 - `MAIL_GATEWAY_LOGIN_EMAIL`
-  邮箱中转站登录邮箱
+  单个邮箱中转站登录邮箱，兼容旧配置
 - `MAIL_GATEWAY_PASSWORD`
-  邮箱中转站登录密码
+  单个邮箱中转站登录密码，兼容旧配置
 - `MAIL_GATEWAY_BASE_URL`
   邮箱中转站 API 地址，默认值为 `https://mail.970410.xyz/api`
 - `PORT`
@@ -65,6 +67,7 @@
 - 本地 Node 版本支持自动读取项目根目录 `.env`
 - Cloudflare Workers 版本使用 `wrangler secret` 管理线上敏感配置
 - 当前前端页面为纯静态资源，由本地服务或 Workers 静态资源能力提供
+- 查询时会优先使用 `MAIL_GATEWAY_ACCOUNTS` 中的账号列表轮询匹配目标邮箱
 
 ## 运行与部署
 

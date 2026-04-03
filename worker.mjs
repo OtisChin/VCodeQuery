@@ -1,9 +1,6 @@
 const MAIL_GATEWAY_DEFAULT_BASE_URL = "https://mail.970410.xyz/api";
 
-const authCache = {
-  token: null,
-  expiresAt: 0,
-};
+const authCache = new Map();
 
 export default {
   async fetch(request, env) {
@@ -48,21 +45,72 @@ function getGatewayBaseUrl(env) {
   );
 }
 
+function getGatewayAccounts(env) {
+  if (env.MAIL_GATEWAY_ACCOUNTS) {
+    let parsed;
+    try {
+      parsed = JSON.parse(env.MAIL_GATEWAY_ACCOUNTS);
+    } catch {
+      const error = new Error("MAIL_GATEWAY_ACCOUNTS 不是合法的 JSON。");
+      error.statusCode = 500;
+      throw error;
+    }
+
+    if (!Array.isArray(parsed) || parsed.length === 0) {
+      const error = new Error("MAIL_GATEWAY_ACCOUNTS 不能为空。");
+      error.statusCode = 500;
+      throw error;
+    }
+
+    return parsed.map((item, index) => {
+      const email = String(item?.email || "").trim();
+      const password = String(item?.password || "").trim();
+      if (!email || !password) {
+        const error = new Error(
+          `MAIL_GATEWAY_ACCOUNTS 第 ${index + 1} 项缺少 email 或 password。`
+        );
+        error.statusCode = 500;
+        throw error;
+      }
+
+      return { email, password };
+    });
+  }
+
+  if (env.MAIL_GATEWAY_LOGIN_EMAIL && env.MAIL_GATEWAY_PASSWORD) {
+    return [
+      {
+        email: env.MAIL_GATEWAY_LOGIN_EMAIL,
+        password: env.MAIL_GATEWAY_PASSWORD,
+      },
+    ];
+  }
+
+  return [];
+}
+
 function requireGatewayConfig(env) {
-  if (!env.MAIL_GATEWAY_LOGIN_EMAIL || !env.MAIL_GATEWAY_PASSWORD) {
+  if (getGatewayAccounts(env).length === 0) {
     const error = new Error(
-      "缺少邮箱中转站登录配置，请设置 MAIL_GATEWAY_LOGIN_EMAIL 和 MAIL_GATEWAY_PASSWORD。"
+      "缺少邮箱中转站登录配置，请设置 MAIL_GATEWAY_ACCOUNTS 或 MAIL_GATEWAY_LOGIN_EMAIL 和 MAIL_GATEWAY_PASSWORD。"
     );
     error.statusCode = 500;
     throw error;
   }
 }
 
-async function getGatewayToken(env) {
+function getAuthCacheKey(env, loginAccount) {
+  return `${loginAccount.email}@@${getGatewayBaseUrl(env)}`;
+}
+
+async function getGatewayToken(env, loginAccount) {
   requireGatewayConfig(env);
 
-  if (authCache.token && authCache.expiresAt > Date.now()) {
-    return authCache.token;
+  const cacheKey = getAuthCacheKey(env, loginAccount);
+  const cacheItem = authCache.get(cacheKey);
+
+  if (cacheItem && cacheItem.expiresAt > Date.now()) {
+    return cacheItem.token;
   }
 
   const response = await fetch(`${getGatewayBaseUrl(env)}/login`, {
@@ -72,8 +120,8 @@ async function getGatewayToken(env) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      email: env.MAIL_GATEWAY_LOGIN_EMAIL,
-      password: env.MAIL_GATEWAY_PASSWORD,
+      email: loginAccount.email,
+      password: loginAccount.password,
     }),
   });
 
@@ -84,13 +132,15 @@ async function getGatewayToken(env) {
     throw error;
   }
 
-  authCache.token = body.data.token;
-  authCache.expiresAt = Date.now() + 10 * 60 * 1000;
-  return authCache.token;
+  authCache.set(cacheKey, {
+    token: body.data.token,
+    expiresAt: Date.now() + 10 * 60 * 1000,
+  });
+  return body.data.token;
 }
 
-async function gatewayFetch(env, pathname, options = {}, allowRetry = true) {
-  const token = await getGatewayToken(env);
+async function gatewayFetch(env, loginAccount, pathname, options = {}, allowRetry = true) {
+  const token = await getGatewayToken(env, loginAccount);
   const response = await fetch(`${getGatewayBaseUrl(env)}${pathname}`, {
     ...options,
     headers: {
@@ -104,9 +154,8 @@ async function gatewayFetch(env, pathname, options = {}, allowRetry = true) {
   const body = await response.json().catch(() => null);
 
   if (body && body.code === 401 && allowRetry) {
-    authCache.token = null;
-    authCache.expiresAt = 0;
-    return gatewayFetch(env, pathname, options, false);
+    authCache.delete(getAuthCacheKey(env, loginAccount));
+    return gatewayFetch(env, loginAccount, pathname, options, false);
   }
 
   if (!response.ok) {
@@ -130,13 +179,14 @@ async function gatewayFetch(env, pathname, options = {}, allowRetry = true) {
   return body.data;
 }
 
-async function findMailboxAccount(env, targetEmail) {
+async function findMailboxAccount(env, loginAccount, targetEmail) {
   let accountId = 0;
   const allAccounts = [];
 
   for (;;) {
     const page = await gatewayFetch(
       env,
+      loginAccount,
       `/account/list?accountId=${accountId}&size=200`
     );
     const items = Array.isArray(page) ? page : [];
@@ -178,16 +228,16 @@ function parseTimestamp(value) {
 function pickLatestEmail(items) {
   return [...items].sort((left, right) => {
     const rightTime = parseTimestamp(
-      right.createdAt ||
-        right.createTime ||
+      right.createTime ||
+        right.createdAt ||
         right.receivedAt ||
         right.date ||
         right.sendTime ||
         right.updatedAt
     );
     const leftTime = parseTimestamp(
-      left.createdAt ||
-        left.createTime ||
+      left.createTime ||
+        left.createdAt ||
         left.receivedAt ||
         left.date ||
         left.sendTime ||
@@ -203,53 +253,18 @@ function pickLatestEmail(items) {
 }
 
 function collectCandidateText(email) {
-  const visited = new WeakSet();
-  const pieces = [];
+  const preferredFields = [
+    email.subject,
+    email.text,
+    email.content,
+    email.message,
+    email.html,
+    email.body,
+  ];
 
-  function visit(value) {
-    if (value == null) {
-      return;
-    }
-
-    if (typeof value === "string") {
-      const text = value.trim();
-      if (text) {
-        pieces.push(text);
-      }
-      return;
-    }
-
-    if (typeof value === "number") {
-      pieces.push(String(value));
-      return;
-    }
-
-    if (typeof value !== "object") {
-      return;
-    }
-
-    if (visited.has(value)) {
-      return;
-    }
-    visited.add(value);
-
-    if (Array.isArray(value)) {
-      value.forEach(visit);
-      return;
-    }
-
-    for (const [key, nested] of Object.entries(value)) {
-      if (
-        /password|token|authorization|headers|cookie|attachment|binary|raw/i.test(key)
-      ) {
-        continue;
-      }
-      visit(nested);
-    }
-  }
-
-  visit(email);
-  return pieces.join("\n");
+  return preferredFields
+    .filter((value) => typeof value === "string" && value.trim())
+    .join("\n");
 }
 
 function extractVerificationCode(text) {
@@ -271,14 +286,14 @@ function extractVerificationCode(text) {
   return null;
 }
 
-async function fetchLatestEmailForAccount(env, accountId) {
+async function fetchLatestEmailForAccount(env, loginAccount, accountId) {
   const attempts = [
     `/email/list?accountId=${accountId}&emailId=0&timeSort=0&size=10&type=0`,
     `/email/latest?emailId=0&accountId=${accountId}`,
   ];
 
   for (const endpoint of attempts) {
-    const data = await gatewayFetch(env, endpoint);
+    const data = await gatewayFetch(env, loginAccount, endpoint);
     const items = Array.isArray(data) ? data : [];
     if (items.length > 0) {
       return pickLatestEmail(items);
@@ -301,13 +316,23 @@ async function handleQueryCode(request, env) {
       return jsonResponse({ error: "邮箱格式不正确。" }, 400);
     }
 
-    const account = await findMailboxAccount(env, targetEmail);
-    if (!account) {
+    let account = null;
+    let matchedLoginAccount = null;
+    for (const loginAccount of getGatewayAccounts(env)) {
+      account = await findMailboxAccount(env, loginAccount, targetEmail);
+      if (account) {
+        matchedLoginAccount = loginAccount;
+        break;
+      }
+    }
+
+    if (!account || !matchedLoginAccount) {
       return jsonResponse({ error: "查询失败，请检查邮箱是否正确" }, 404);
     }
 
     const latestEmail = await fetchLatestEmailForAccount(
       env,
+      matchedLoginAccount,
       account.accountId || account.id
     );
     if (!latestEmail) {
@@ -325,8 +350,8 @@ async function handleQueryCode(request, env) {
             subject: latestEmail.subject || "",
             from: latestEmail.fromName || latestEmail.fromEmail || "",
             receivedAt:
-              latestEmail.createdAt ||
               latestEmail.createTime ||
+              latestEmail.createdAt ||
               latestEmail.receivedAt ||
               latestEmail.date ||
               "",
@@ -342,8 +367,8 @@ async function handleQueryCode(request, env) {
         subject: latestEmail.subject || "",
         from: latestEmail.fromName || latestEmail.fromEmail || "",
         receivedAt:
-          latestEmail.createdAt ||
           latestEmail.createTime ||
+          latestEmail.createdAt ||
           latestEmail.receivedAt ||
           latestEmail.date ||
           "",

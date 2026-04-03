@@ -172,12 +172,40 @@ body {
   text-align: center;
 }
 
+.quick-link {
+  margin-top: 14px;
+  color: #5f7697;
+  font-size: 1rem;
+  font-weight: 600;
+  text-align: center;
+}
+
+.quick-link a {
+  color: var(--link);
+  text-decoration: none;
+  font-weight: 700;
+}
+
 .status-line.is-error {
   color: #9c2b2b;
 }
 
 .status-line.is-success {
   color: #1f7f68;
+}
+
+.status-extra {
+  margin-top: 6px;
+  text-align: center;
+  color: #5f7697;
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.status-extra a {
+  color: var(--link);
+  text-decoration: none;
+  font-weight: 700;
 }
 
 .result-card {
@@ -240,7 +268,7 @@ body {
 }
 
 .helper-copy {
-  margin-top: 46px;
+  margin-top: 12px;
   color: #98a8c1;
   font-size: 0.95rem;
   text-align: center;
@@ -291,4 +319,3 @@ body {
     gap: 14px;
   }
 }
-

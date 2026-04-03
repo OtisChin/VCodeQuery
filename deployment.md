@@ -15,16 +15,23 @@ Copy-Item .env.example .env
 然后编辑 `.env`，至少填写：
 
 ```env
-MAIL_GATEWAY_LOGIN_EMAIL=your-login-email@example.com
-MAIL_GATEWAY_PASSWORD=your-password
+MAIL_GATEWAY_ACCOUNTS=[{"email":"your-login-email@example.com","password":"your-password"}]
 ```
 
 可选项：
 
 ```env
 MAIL_GATEWAY_BASE_URL=https://mail.970410.xyz/api
+MAIL_GATEWAY_LOGIN_EMAIL=your-login-email@example.com
+MAIL_GATEWAY_PASSWORD=your-password
 PORT=3000
 ```
+
+说明：
+
+- 推荐使用 `MAIL_GATEWAY_ACCOUNTS`
+- 该变量是 JSON 数组，支持多个登录账号
+- 如果未设置 `MAIL_GATEWAY_ACCOUNTS`，系统会回退使用单账号配置
 
 ### 2. 启动本地服务
 
@@ -57,6 +64,18 @@ npx wrangler login
 ```
 
 ### 3. 配置生产环境 Secrets
+
+```powershell
+npx wrangler secret put MAIL_GATEWAY_ACCOUNTS
+```
+
+示例值：
+
+```json
+[{"email":"a@example.com","password":"123456"},{"email":"b@example.com","password":"abcdef"}]
+```
+
+如果你仍然只想使用单账号，也可以继续配置：
 
 ```powershell
 npx wrangler secret put MAIL_GATEWAY_LOGIN_EMAIL

@@ -13,6 +13,7 @@ const PUBLIC_DIR = path.join(__dirname, "public");
 const MAIL_GATEWAY_BASE_URL = (
   process.env.MAIL_GATEWAY_BASE_URL || "https://mail.970410.xyz/api"
 ).replace(/\/+$/, "");
+const MAIL_GATEWAY_ACCOUNTS = process.env.MAIL_GATEWAY_ACCOUNTS || "";
 const MAIL_GATEWAY_LOGIN_EMAIL = process.env.MAIL_GATEWAY_LOGIN_EMAIL || "";
 const MAIL_GATEWAY_PASSWORD = process.env.MAIL_GATEWAY_PASSWORD || "";
 
@@ -28,10 +29,7 @@ const staticMimeTypes = {
   ".ico": "image/x-icon",
 };
 
-const authCache = {
-  token: null,
-  expiresAt: 0,
-};
+const authCache = new Map();
 
 function loadDotEnv() {
   const envPath = path.join(__dirname, ".env");
@@ -132,18 +130,66 @@ async function serveStaticFile(req, res) {
   }
 }
 
+function getGatewayAccounts() {
+  if (MAIL_GATEWAY_ACCOUNTS) {
+    let parsed;
+    try {
+      parsed = JSON.parse(MAIL_GATEWAY_ACCOUNTS);
+    } catch {
+      const error = new Error("MAIL_GATEWAY_ACCOUNTS 不是合法的 JSON。");
+      error.statusCode = 500;
+      throw error;
+    }
+
+    if (!Array.isArray(parsed) || parsed.length === 0) {
+      const error = new Error("MAIL_GATEWAY_ACCOUNTS 不能为空。");
+      error.statusCode = 500;
+      throw error;
+    }
+
+    return parsed.map((item, index) => {
+      const email = String(item?.email || "").trim();
+      const password = String(item?.password || "").trim();
+      if (!email || !password) {
+        const error = new Error(
+          `MAIL_GATEWAY_ACCOUNTS 第 ${index + 1} 项缺少 email 或 password。`
+        );
+        error.statusCode = 500;
+        throw error;
+      }
+
+      return { email, password };
+    });
+  }
+
+  if (MAIL_GATEWAY_LOGIN_EMAIL && MAIL_GATEWAY_PASSWORD) {
+    return [
+      {
+        email: MAIL_GATEWAY_LOGIN_EMAIL,
+        password: MAIL_GATEWAY_PASSWORD,
+      },
+    ];
+  }
+
+  return [];
+}
+
 function requireGatewayConfig() {
-  if (!MAIL_GATEWAY_LOGIN_EMAIL || !MAIL_GATEWAY_PASSWORD) {
+  if (getGatewayAccounts().length === 0) {
     const error = new Error(
-      "缺少邮箱中转站登录配置，请设置 MAIL_GATEWAY_LOGIN_EMAIL 和 MAIL_GATEWAY_PASSWORD。"
+      "缺少邮箱中转站登录配置，请设置 MAIL_GATEWAY_ACCOUNTS 或 MAIL_GATEWAY_LOGIN_EMAIL 和 MAIL_GATEWAY_PASSWORD。"
     );
     error.statusCode = 500;
     throw error;
   }
 }
 
-async function gatewayFetch(pathname, options = {}, allowRetry = true) {
-  const token = await getGatewayToken();
+function getAuthCacheKey(loginAccount) {
+  return `${loginAccount.email}@@${MAIL_GATEWAY_BASE_URL}`;
+}
+
+async function gatewayFetch(loginAccount, pathname, options = {}, allowRetry = true) {
+  const token = await getGatewayToken(loginAccount);
   const response = await fetch(`${MAIL_GATEWAY_BASE_URL}${pathname}`, {
     ...options,
     headers: {
@@ -157,9 +203,8 @@ async function gatewayFetch(pathname, options = {}, allowRetry = true) {
   const body = await response.json().catch(() => null);
 
   if (body && body.code === 401 && allowRetry) {
-    authCache.token = null;
-    authCache.expiresAt = 0;
-    return gatewayFetch(pathname, options, false);
+    authCache.delete(getAuthCacheKey(loginAccount));
+    return gatewayFetch(loginAccount, pathname, options, false);
   }
 
   if (!response.ok) {
@@ -183,11 +228,14 @@ async function gatewayFetch(pathname, options = {}, allowRetry = true) {
   return body.data;
 }
 
-async function getGatewayToken() {
+async function getGatewayToken(loginAccount) {
   requireGatewayConfig();
 
-  if (authCache.token && authCache.expiresAt > Date.now()) {
-    return authCache.token;
+  const cacheKey = getAuthCacheKey(loginAccount);
+  const cacheItem = authCache.get(cacheKey);
+
+  if (cacheItem && cacheItem.expiresAt > Date.now()) {
+    return cacheItem.token;
   }
 
   const response = await fetch(`${MAIL_GATEWAY_BASE_URL}/login`, {
@@ -197,8 +245,8 @@ async function getGatewayToken() {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      email: MAIL_GATEWAY_LOGIN_EMAIL,
-      password: MAIL_GATEWAY_PASSWORD,
+      email: loginAccount.email,
+      password: loginAccount.password,
     }),
   });
 
@@ -209,17 +257,22 @@ async function getGatewayToken() {
     throw error;
   }
 
-  authCache.token = body.data.token;
-  authCache.expiresAt = Date.now() + 10 * 60 * 1000;
-  return authCache.token;
+  authCache.set(cacheKey, {
+    token: body.data.token,
+    expiresAt: Date.now() + 10 * 60 * 1000,
+  });
+  return body.data.token;
 }
 
-async function findMailboxAccount(targetEmail) {
+async function findMailboxAccount(loginAccount, targetEmail) {
   let accountId = 0;
   const allAccounts = [];
 
   for (;;) {
-    const page = await gatewayFetch(`/account/list?accountId=${accountId}&size=200`);
+    const page = await gatewayFetch(
+      loginAccount,
+      `/account/list?accountId=${accountId}&size=200`
+    );
     const items = Array.isArray(page) ? page : [];
 
     if (items.length === 0) {
@@ -259,16 +312,16 @@ function parseTimestamp(value) {
 function pickLatestEmail(items) {
   return [...items].sort((left, right) => {
     const rightTime = parseTimestamp(
-      right.createdAt ||
-        right.createTime ||
+      right.createTime ||
+        right.createdAt ||
         right.receivedAt ||
         right.date ||
         right.sendTime ||
         right.updatedAt
     );
     const leftTime = parseTimestamp(
-      left.createdAt ||
-        left.createTime ||
+      left.createTime ||
+        left.createdAt ||
         left.receivedAt ||
         left.date ||
         left.sendTime ||
@@ -284,53 +337,18 @@ function pickLatestEmail(items) {
 }
 
 function collectCandidateText(email) {
-  const visited = new WeakSet();
-  const pieces = [];
+  const preferredFields = [
+    email.subject,
+    email.text,
+    email.content,
+    email.message,
+    email.html,
+    email.body,
+  ];
 
-  function visit(value) {
-    if (value == null) {
-      return;
-    }
-
-    if (typeof value === "string") {
-      const text = value.trim();
-      if (text) {
-        pieces.push(text);
-      }
-      return;
-    }
-
-    if (typeof value === "number") {
-      pieces.push(String(value));
-      return;
-    }
-
-    if (typeof value !== "object") {
-      return;
-    }
-
-    if (visited.has(value)) {
-      return;
-    }
-    visited.add(value);
-
-    if (Array.isArray(value)) {
-      value.forEach(visit);
-      return;
-    }
-
-    for (const [key, nested] of Object.entries(value)) {
-      if (
-        /password|token|authorization|headers|cookie|attachment|binary|raw/i.test(key)
-      ) {
-        continue;
-      }
-      visit(nested);
-    }
-  }
-
-  visit(email);
-  return pieces.join("\n");
+  return preferredFields
+    .filter((value) => typeof value === "string" && value.trim())
+    .join("\n");
 }
 
 function extractVerificationCode(text) {
@@ -352,14 +370,14 @@ function extractVerificationCode(text) {
   return null;
 }
 
-async function fetchLatestEmailForAccount(accountId) {
+async function fetchLatestEmailForAccount(loginAccount, accountId) {
   const attempts = [
     `/email/list?accountId=${accountId}&emailId=0&timeSort=0&size=10&type=0`,
     `/email/latest?emailId=0&accountId=${accountId}`,
   ];
 
   for (const endpoint of attempts) {
-    const data = await gatewayFetch(endpoint);
+    const data = await gatewayFetch(loginAccount, endpoint);
     const items = Array.isArray(data) ? data : [];
     if (items.length > 0) {
       return pickLatestEmail(items);
@@ -384,13 +402,25 @@ async function handleQueryCode(req, res) {
       return;
     }
 
-    const account = await findMailboxAccount(targetEmail);
-    if (!account) {
+    let account = null;
+    let matchedLoginAccount = null;
+    for (const loginAccount of getGatewayAccounts()) {
+      account = await findMailboxAccount(loginAccount, targetEmail);
+      if (account) {
+        matchedLoginAccount = loginAccount;
+        break;
+      }
+    }
+
+    if (!account || !matchedLoginAccount) {
       sendJson(res, 404, { error: "查询失败，请检查邮箱是否正确" });
       return;
     }
 
-    const latestEmail = await fetchLatestEmailForAccount(account.accountId || account.id);
+    const latestEmail = await fetchLatestEmailForAccount(
+      matchedLoginAccount,
+      account.accountId || account.id
+    );
     if (!latestEmail) {
       sendJson(res, 404, { error: "该邮箱还没有收到邮件。" });
       return;
@@ -406,8 +436,8 @@ async function handleQueryCode(req, res) {
           subject: latestEmail.subject || "",
           from: latestEmail.fromName || latestEmail.fromEmail || "",
           receivedAt:
-            latestEmail.createdAt ||
             latestEmail.createTime ||
+            latestEmail.createdAt ||
             latestEmail.receivedAt ||
             latestEmail.date ||
             "",
@@ -422,8 +452,8 @@ async function handleQueryCode(req, res) {
         subject: latestEmail.subject || "",
         from: latestEmail.fromName || latestEmail.fromEmail || "",
         receivedAt:
-          latestEmail.createdAt ||
           latestEmail.createTime ||
+          latestEmail.createdAt ||
           latestEmail.receivedAt ||
           latestEmail.date ||
           "",

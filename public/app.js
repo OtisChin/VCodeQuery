@@ -2,6 +2,8 @@ const form = document.getElementById("query-form");
 const emailInput = document.getElementById("email");
 const submitButton = document.getElementById("submit-button");
 const statusLine = document.getElementById("status");
+const statusExtra = document.getElementById("status-extra");
+const quickLink = document.getElementById("quick-link");
 const resultCard = document.getElementById("result");
 const resultCode = document.getElementById("result-code");
 const resultSubject = document.getElementById("result-subject");
@@ -16,6 +18,14 @@ function setStatus(message, type = "") {
   if (type) {
     statusLine.classList.add(`is-${type}`);
   }
+}
+
+function setStatusExtraVisible(visible) {
+  statusExtra.classList.toggle("is-hidden-inline", !visible);
+}
+
+function setQuickLinkVisible(visible) {
+  quickLink.classList.toggle("is-hidden-inline", !visible);
 }
 
 function setLoading(loading) {
@@ -90,12 +100,16 @@ form.addEventListener("submit", async (event) => {
   const email = emailInput.value.trim();
   if (!email) {
     setStatus("请输入邮箱地址。", "error");
+    setStatusExtraVisible(false);
+    setQuickLinkVisible(true);
     hideResult();
     return;
   }
 
   setLoading(true);
   setStatus("正在查询最新邮件并提取验证码...");
+  setStatusExtraVisible(false);
+  setQuickLinkVisible(true);
   hideResult();
 
   try {
@@ -114,8 +128,12 @@ form.addEventListener("submit", async (event) => {
 
     showResult(payload);
     setStatus("验证码已提取。", "success");
+    setStatusExtraVisible(true);
+    setQuickLinkVisible(false);
   } catch (error) {
     setStatus(error.message || "查询失败。", "error");
+    setStatusExtraVisible(false);
+    setQuickLinkVisible(true);
     hideResult();
   } finally {
     setLoading(false);
