@@ -152,7 +152,7 @@ function getAuthCacheKey(group, loginAccount) {
   return `${loginAccount.email}@@${group.baseUrl}`;
 }
 
-async function getGatewayToken(group, loginAccount) {
+async function getGatewayToken(env, group, loginAccount) {
   requireGatewayConfig(env);
 
   const cacheKey = getAuthCacheKey(group, loginAccount);
@@ -188,8 +188,8 @@ async function getGatewayToken(group, loginAccount) {
   return body.data.token;
 }
 
-async function gatewayFetch(group, loginAccount, pathname, options = {}, allowRetry = true) {
-  const token = await getGatewayToken(group, loginAccount);
+async function gatewayFetch(env, group, loginAccount, pathname, options = {}, allowRetry = true) {
+  const token = await getGatewayToken(env, group, loginAccount);
   const response = await fetch(`${group.baseUrl}${pathname}`, {
     ...options,
     headers: {
@@ -204,7 +204,7 @@ async function gatewayFetch(group, loginAccount, pathname, options = {}, allowRe
 
   if (body && body.code === 401 && allowRetry) {
     authCache.delete(getAuthCacheKey(group, loginAccount));
-    return gatewayFetch(group, loginAccount, pathname, options, false);
+    return gatewayFetch(env, group, loginAccount, pathname, options, false);
   }
 
   if (!response.ok) {
@@ -228,12 +228,13 @@ async function gatewayFetch(group, loginAccount, pathname, options = {}, allowRe
   return body.data;
 }
 
-async function findMailboxAccount(group, loginAccount, targetEmail) {
+async function findMailboxAccount(env, group, loginAccount, targetEmail) {
   let accountId = 0;
   const allAccounts = [];
 
   for (;;) {
     const page = await gatewayFetch(
+      env,
       group,
       loginAccount,
       `/account/list?accountId=${accountId}&size=200`
@@ -335,14 +336,14 @@ function extractVerificationCode(text) {
   return null;
 }
 
-async function fetchLatestEmailForAccount(group, loginAccount, accountId) {
+async function fetchLatestEmailForAccount(env, group, loginAccount, accountId) {
   const attempts = [
     `/email/list?accountId=${accountId}&emailId=0&timeSort=0&size=10&type=0`,
     `/email/latest?emailId=0&accountId=${accountId}`,
   ];
 
   for (const endpoint of attempts) {
-    const data = await gatewayFetch(group, loginAccount, endpoint);
+    const data = await gatewayFetch(env, group, loginAccount, endpoint);
     const items = Array.isArray(data) ? data : [];
     if (items.length > 0) {
       return pickLatestEmail(items);
@@ -370,7 +371,7 @@ async function handleQueryCode(request, env) {
     let matchedLoginAccount = null;
     for (const gatewayGroup of getGatewayGroups(env)) {
       for (const loginAccount of gatewayGroup.accounts) {
-        account = await findMailboxAccount(gatewayGroup, loginAccount, targetEmail);
+        account = await findMailboxAccount(env, gatewayGroup, loginAccount, targetEmail);
         if (account) {
           group = gatewayGroup;
           matchedLoginAccount = loginAccount;
@@ -388,6 +389,7 @@ async function handleQueryCode(request, env) {
     }
 
     const latestEmail = await fetchLatestEmailForAccount(
+      env,
       group,
       matchedLoginAccount,
       account.accountId || account.id
