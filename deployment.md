@@ -15,7 +15,7 @@ Copy-Item .env.example .env
 然后编辑 `.env`，至少填写：
 
 ```env
-MAIL_GATEWAY_ACCOUNTS=[{"email":"your-login-email@example.com","password":"your-password"}]
+MAIL_GATEWAY_GROUPS=[{"baseUrl":"https://mail.970410.xyz/api","accounts":[{"email":"your-login-email@example.com","password":"your-password"}]}]
 ```
 
 可选项：
@@ -24,14 +24,18 @@ MAIL_GATEWAY_ACCOUNTS=[{"email":"your-login-email@example.com","password":"your-
 MAIL_GATEWAY_BASE_URL=https://mail.970410.xyz/api
 MAIL_GATEWAY_LOGIN_EMAIL=your-login-email@example.com
 MAIL_GATEWAY_PASSWORD=your-password
+MAIL_GATEWAY_ACCOUNTS=[{"email":"your-login-email@example.com","password":"your-password"}]
 PORT=3000
 ```
 
 说明：
 
+- 推荐使用 `MAIL_GATEWAY_GROUPS`
+- 该变量支持多组 `baseUrl` 和对应账号列表
 - 推荐使用 `MAIL_GATEWAY_ACCOUNTS`
 - 该变量是 JSON 数组，支持多个登录账号
-- 如果未设置 `MAIL_GATEWAY_ACCOUNTS`，系统会回退使用单账号配置
+- 如果未设置 `MAIL_GATEWAY_GROUPS`，系统会回退到 `MAIL_GATEWAY_ACCOUNTS`
+- 如果仍未设置 `MAIL_GATEWAY_ACCOUNTS`，系统会回退使用单账号配置
 
 ### 2. 启动本地服务
 
@@ -64,6 +68,18 @@ npx wrangler login
 ```
 
 ### 3. 配置生产环境 Secrets
+
+```powershell
+npx wrangler secret put MAIL_GATEWAY_GROUPS
+```
+
+示例值：
+
+```json
+[{"baseUrl":"https://mail.970410.xyz/api","accounts":[{"email":"a@example.com","password":"123456"}]},{"baseUrl":"https://mail.example2.com/api","accounts":[{"email":"b@example.com","password":"abcdef"}]}]
+```
+
+如果你只需要单个中转站但多个登录账号，也可以只配置：
 
 ```powershell
 npx wrangler secret put MAIL_GATEWAY_ACCOUNTS
@@ -131,7 +147,7 @@ npm run deploy
 
 ## 注意事项
 
-- 正式环境不要把邮箱账号密码写死在代码中
+- 正式环境不要把邮箱账号密码和中转站地址写死在代码中
 - Cloudflare 线上环境请使用 `wrangler secret put`
 - 本地 Node 版和 Worker 版使用的是同一套业务逻辑，但入口不同
 - 如果浏览器仍显示旧样式，先关闭旧进程，再重新启动服务

@@ -45,6 +45,73 @@ function getGatewayBaseUrl(env) {
   );
 }
 
+function parseAccounts(accounts, configLabel) {
+  if (!Array.isArray(accounts) || accounts.length === 0) {
+    const error = new Error(`${configLabel} 不能为空。`);
+    error.statusCode = 500;
+    throw error;
+  }
+
+  return accounts.map((item, index) => {
+    const email = String(item?.email || "").trim();
+    const password = String(item?.password || "").trim();
+    if (!email || !password) {
+      const error = new Error(
+        `${configLabel} 第 ${index + 1} 项缺少 email 或 password。`
+      );
+      error.statusCode = 500;
+      throw error;
+    }
+
+    return { email, password };
+  });
+}
+
+function getGatewayGroups(env) {
+  if (env.MAIL_GATEWAY_GROUPS) {
+    let parsed;
+    try {
+      parsed = JSON.parse(env.MAIL_GATEWAY_GROUPS);
+    } catch {
+      const error = new Error("MAIL_GATEWAY_GROUPS 不是合法的 JSON。");
+      error.statusCode = 500;
+      throw error;
+    }
+
+    if (!Array.isArray(parsed) || parsed.length === 0) {
+      const error = new Error("MAIL_GATEWAY_GROUPS 不能为空。");
+      error.statusCode = 500;
+      throw error;
+    }
+
+    return parsed.map((group, index) => {
+      const baseUrl = String(group?.baseUrl || "").trim().replace(/\/+$/, "");
+      if (!baseUrl) {
+        const error = new Error(
+          `MAIL_GATEWAY_GROUPS 第 ${index + 1} 项缺少 baseUrl。`
+        );
+        error.statusCode = 500;
+        throw error;
+      }
+
+      return {
+        baseUrl,
+        accounts: parseAccounts(
+          group.accounts,
+          `MAIL_GATEWAY_GROUPS 第 ${index + 1} 项 accounts`
+        ),
+      };
+    });
+  }
+
+  return [
+    {
+      baseUrl: getGatewayBaseUrl(env),
+      accounts: getGatewayAccounts(env),
+    },
+  ];
+}
+
 function getGatewayAccounts(env) {
   if (env.MAIL_GATEWAY_ACCOUNTS) {
     let parsed;
@@ -56,25 +123,7 @@ function getGatewayAccounts(env) {
       throw error;
     }
 
-    if (!Array.isArray(parsed) || parsed.length === 0) {
-      const error = new Error("MAIL_GATEWAY_ACCOUNTS 不能为空。");
-      error.statusCode = 500;
-      throw error;
-    }
-
-    return parsed.map((item, index) => {
-      const email = String(item?.email || "").trim();
-      const password = String(item?.password || "").trim();
-      if (!email || !password) {
-        const error = new Error(
-          `MAIL_GATEWAY_ACCOUNTS 第 ${index + 1} 项缺少 email 或 password。`
-        );
-        error.statusCode = 500;
-        throw error;
-      }
-
-      return { email, password };
-    });
+    return parseAccounts(parsed, "MAIL_GATEWAY_ACCOUNTS");
   }
 
   if (env.MAIL_GATEWAY_LOGIN_EMAIL && env.MAIL_GATEWAY_PASSWORD) {
@@ -90,30 +139,30 @@ function getGatewayAccounts(env) {
 }
 
 function requireGatewayConfig(env) {
-  if (getGatewayAccounts(env).length === 0) {
+  if (getGatewayGroups(env).length === 0) {
     const error = new Error(
-      "缺少邮箱中转站登录配置，请设置 MAIL_GATEWAY_ACCOUNTS 或 MAIL_GATEWAY_LOGIN_EMAIL 和 MAIL_GATEWAY_PASSWORD。"
+      "缺少邮箱中转站登录配置，请设置 MAIL_GATEWAY_GROUPS、MAIL_GATEWAY_ACCOUNTS 或 MAIL_GATEWAY_LOGIN_EMAIL 和 MAIL_GATEWAY_PASSWORD。"
     );
     error.statusCode = 500;
     throw error;
   }
 }
 
-function getAuthCacheKey(env, loginAccount) {
-  return `${loginAccount.email}@@${getGatewayBaseUrl(env)}`;
+function getAuthCacheKey(group, loginAccount) {
+  return `${loginAccount.email}@@${group.baseUrl}`;
 }
 
-async function getGatewayToken(env, loginAccount) {
+async function getGatewayToken(group, loginAccount) {
   requireGatewayConfig(env);
 
-  const cacheKey = getAuthCacheKey(env, loginAccount);
+  const cacheKey = getAuthCacheKey(group, loginAccount);
   const cacheItem = authCache.get(cacheKey);
 
   if (cacheItem && cacheItem.expiresAt > Date.now()) {
     return cacheItem.token;
   }
 
-  const response = await fetch(`${getGatewayBaseUrl(env)}/login`, {
+  const response = await fetch(`${group.baseUrl}/login`, {
     method: "POST",
     headers: {
       Accept: "application/json",
@@ -139,9 +188,9 @@ async function getGatewayToken(env, loginAccount) {
   return body.data.token;
 }
 
-async function gatewayFetch(env, loginAccount, pathname, options = {}, allowRetry = true) {
-  const token = await getGatewayToken(env, loginAccount);
-  const response = await fetch(`${getGatewayBaseUrl(env)}${pathname}`, {
+async function gatewayFetch(group, loginAccount, pathname, options = {}, allowRetry = true) {
+  const token = await getGatewayToken(group, loginAccount);
+  const response = await fetch(`${group.baseUrl}${pathname}`, {
     ...options,
     headers: {
       Accept: "application/json",
@@ -154,8 +203,8 @@ async function gatewayFetch(env, loginAccount, pathname, options = {}, allowRetr
   const body = await response.json().catch(() => null);
 
   if (body && body.code === 401 && allowRetry) {
-    authCache.delete(getAuthCacheKey(env, loginAccount));
-    return gatewayFetch(env, loginAccount, pathname, options, false);
+    authCache.delete(getAuthCacheKey(group, loginAccount));
+    return gatewayFetch(group, loginAccount, pathname, options, false);
   }
 
   if (!response.ok) {
@@ -179,13 +228,13 @@ async function gatewayFetch(env, loginAccount, pathname, options = {}, allowRetr
   return body.data;
 }
 
-async function findMailboxAccount(env, loginAccount, targetEmail) {
+async function findMailboxAccount(group, loginAccount, targetEmail) {
   let accountId = 0;
   const allAccounts = [];
 
   for (;;) {
     const page = await gatewayFetch(
-      env,
+      group,
       loginAccount,
       `/account/list?accountId=${accountId}&size=200`
     );
@@ -286,14 +335,14 @@ function extractVerificationCode(text) {
   return null;
 }
 
-async function fetchLatestEmailForAccount(env, loginAccount, accountId) {
+async function fetchLatestEmailForAccount(group, loginAccount, accountId) {
   const attempts = [
     `/email/list?accountId=${accountId}&emailId=0&timeSort=0&size=10&type=0`,
     `/email/latest?emailId=0&accountId=${accountId}`,
   ];
 
   for (const endpoint of attempts) {
-    const data = await gatewayFetch(env, loginAccount, endpoint);
+    const data = await gatewayFetch(group, loginAccount, endpoint);
     const items = Array.isArray(data) ? data : [];
     if (items.length > 0) {
       return pickLatestEmail(items);
@@ -316,22 +365,30 @@ async function handleQueryCode(request, env) {
       return jsonResponse({ error: "邮箱格式不正确。" }, 400);
     }
 
+    let group = null;
     let account = null;
     let matchedLoginAccount = null;
-    for (const loginAccount of getGatewayAccounts(env)) {
-      account = await findMailboxAccount(env, loginAccount, targetEmail);
+    for (const gatewayGroup of getGatewayGroups(env)) {
+      for (const loginAccount of gatewayGroup.accounts) {
+        account = await findMailboxAccount(gatewayGroup, loginAccount, targetEmail);
+        if (account) {
+          group = gatewayGroup;
+          matchedLoginAccount = loginAccount;
+          break;
+        }
+      }
+
       if (account) {
-        matchedLoginAccount = loginAccount;
         break;
       }
     }
 
-    if (!account || !matchedLoginAccount) {
+    if (!group || !account || !matchedLoginAccount) {
       return jsonResponse({ error: "查询失败，请检查邮箱是否正确" }, 404);
     }
 
     const latestEmail = await fetchLatestEmailForAccount(
-      env,
+      group,
       matchedLoginAccount,
       account.accountId || account.id
     );
