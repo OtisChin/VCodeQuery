@@ -1,6 +1,7 @@
 const MAIL_GATEWAY_DEFAULT_BASE_URL = "https://mail.970410.xyz/api";
 
 const authCache = new Map();
+const mailboxAccountCache = new Map();
 
 export default {
   async fetch(request, env) {
@@ -43,6 +44,17 @@ function getGatewayBaseUrl(env) {
     /\/+$/,
     ""
   );
+}
+
+function getFallbackAccountIdRange(env) {
+  const rawStart = Number(env.MAIL_GATEWAY_FALLBACK_ACCOUNT_ID_START || 1);
+  const rawEnd = Number(env.MAIL_GATEWAY_FALLBACK_ACCOUNT_ID_END || 2000);
+  const start = Number.isFinite(rawStart) ? Math.max(1, Math.floor(rawStart)) : 1;
+  const end = Number.isFinite(rawEnd)
+    ? Math.max(start, Math.floor(rawEnd))
+    : Math.max(start, 2000);
+
+  return { start, end };
 }
 
 function parseAccounts(accounts, configLabel) {
@@ -152,6 +164,29 @@ function getAuthCacheKey(group, loginAccount) {
   return `${loginAccount.email}@@${group.baseUrl}`;
 }
 
+function getMailboxCacheKey(group, loginAccount, targetEmail) {
+  return `${getAuthCacheKey(group, loginAccount)}@@${targetEmail}`;
+}
+
+function rememberMailboxAccount(group, loginAccount, targetEmail, account) {
+  if (!account) {
+    return;
+  }
+
+  mailboxAccountCache.set(
+    getMailboxCacheKey(group, loginAccount, targetEmail),
+    account
+  );
+}
+
+function getRememberedMailboxAccount(group, loginAccount, targetEmail) {
+  return (
+    mailboxAccountCache.get(
+      getMailboxCacheKey(group, loginAccount, targetEmail)
+    ) || null
+  );
+}
+
 async function getGatewayToken(env, group, loginAccount) {
   requireGatewayConfig(env);
 
@@ -228,7 +263,45 @@ async function gatewayFetch(env, group, loginAccount, pathname, options = {}, al
   return body.data;
 }
 
+async function findMailboxByLatestEmail(env, group, loginAccount, targetEmail) {
+  const { start, end } = getFallbackAccountIdRange(env);
+
+  for (let id = start; id <= end; id++) {
+    try {
+      const emails = await gatewayFetch(
+        env,
+        group,
+        loginAccount,
+        `/email/latest?emailId=0&accountId=${id}`
+      );
+      const items = Array.isArray(emails) ? emails : [];
+      if (items.length === 0) {
+        continue;
+      }
+
+      const latestEmail = items[0];
+      const toEmail = String(
+        latestEmail.toEmail || latestEmail.toAddress || ""
+      )
+        .trim()
+        .toLowerCase();
+      if (toEmail === targetEmail) {
+        return { accountId: id, email: toEmail };
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  return null;
+}
+
 async function findMailboxAccount(env, group, loginAccount, targetEmail) {
+  const remembered = getRememberedMailboxAccount(group, loginAccount, targetEmail);
+  if (remembered) {
+    return remembered;
+  }
+
   let accountId = 0;
   const allAccounts = [];
 
@@ -260,34 +333,19 @@ async function findMailboxAccount(env, group, loginAccount, targetEmail) {
   });
 
   if (found) {
+    rememberMailboxAccount(group, loginAccount, targetEmail, found);
     return found;
   }
 
-  const maxAccountId = allAccounts.length > 0
-    ? Math.max(...allAccounts.map((item) => Number(item.accountId || item.id || 0)))
-    : 200;
-
-  for (let id = 1; id <= maxAccountId + 500; id++) {
-    try {
-      const emails = await gatewayFetch(
-        env,
-        group,
-        loginAccount,
-        `/email/latest?emailId=0&accountId=${id}`
-      );
-      const items = Array.isArray(emails) ? emails : [];
-      if (items.length === 0) {
-        continue;
-      }
-
-      const latestEmail = items[0];
-      const toEmail = String(latestEmail.toEmail || latestEmail.toAddress || "").trim().toLowerCase();
-      if (toEmail === targetEmail) {
-        return { accountId: id, email: toEmail };
-      }
-    } catch {
-      continue;
-    }
+  const fallbackMatch = await findMailboxByLatestEmail(
+    env,
+    group,
+    loginAccount,
+    targetEmail
+  );
+  if (fallbackMatch) {
+    rememberMailboxAccount(group, loginAccount, targetEmail, fallbackMatch);
+    return fallbackMatch;
   }
 
   return null;
