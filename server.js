@@ -339,10 +339,42 @@ async function findMailboxAccount(group, loginAccount, targetEmail) {
     }
   }
 
-  return allAccounts.find((item) => {
+  const found = allAccounts.find((item) => {
     const candidate = String(item.email || item.address || "").trim().toLowerCase();
     return candidate === targetEmail;
   });
+
+  if (found) {
+    return found;
+  }
+
+  const maxAccountId = allAccounts.length > 0
+    ? Math.max(...allAccounts.map((item) => Number(item.accountId || item.id || 0)))
+    : 200;
+
+  for (let id = 1; id <= maxAccountId + 500; id++) {
+    try {
+      const emails = await gatewayFetch(
+        group,
+        loginAccount,
+        `/email/latest?emailId=0&accountId=${id}`
+      );
+      const items = Array.isArray(emails) ? emails : [];
+      if (items.length === 0) {
+        continue;
+      }
+
+      const latestEmail = items[0];
+      const toEmail = String(latestEmail.toEmail || latestEmail.toAddress || "").trim().toLowerCase();
+      if (toEmail === targetEmail) {
+        return { accountId: id, email: toEmail };
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  return null;
 }
 
 function parseTimestamp(value) {
