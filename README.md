@@ -61,10 +61,12 @@
   单个邮箱中转站登录密码，兼容旧配置
 - `MAIL_GATEWAY_BASE_URL`
   邮箱中转站 API 地址，默认值为 `https://mail.970410.xyz/api`
-- `MAIL_GATEWAY_FALLBACK_ACCOUNT_ID_START`
-  当 `/account/list` 查不到时，回退扫描邮件账号的起始 `accountId`，默认 `1`
-- `MAIL_GATEWAY_FALLBACK_ACCOUNT_ID_END`
-  当 `/account/list` 查不到时，回退扫描邮件账号的结束 `accountId`，默认 `2000`
+- `MAIL_GATEWAY_ACCOUNT_LIST_PAGE_SIZE`
+  查询 `/account/list` 时每页拉取数量，默认 `1000`
+- `MAIL_GATEWAY_ACCOUNT_CACHE_TTL_MS`
+  账号列表缓存时间，单位毫秒，默认 `300000`
+- `MAIL_GATEWAY_FORWARD_PROBE_LIMIT`
+  当 `/account/list` 没命中时，仅向已知最大 `accountId` 之后继续探测的数量，默认 `20`
 - `PORT`
   本地 Node 服务端口，默认值为 `3000`
 
@@ -74,7 +76,8 @@
 - Cloudflare Workers 版本使用 `wrangler secret` 管理线上敏感配置
 - 当前前端页面为纯静态资源，由本地服务或 Workers 静态资源能力提供
 - 查询时会优先使用 `MAIL_GATEWAY_GROUPS` 中的中转站分组轮询匹配目标邮箱
-- 如果目标邮箱不在 `/account/list` 返回结果中，会继续按 `accountId` 范围扫描最新邮件进行兜底匹配
+- 查询会缓存 `/account/list` 结果，减少重复请求
+- 如果目标邮箱不在 `/account/list` 返回结果中，只会向最新账号范围之后做少量前向探测，避免 Worker 触发过多 subrequests
 
 ## 运行与部署
 
