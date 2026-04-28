@@ -343,6 +343,7 @@ async function loadMailboxAccounts(env, group, loginAccount) {
   let accountId = 0;
   let maxAccountId = 0;
   const byEmail = new Map();
+  const domains = new Set();
   const pageSize = getAccountListPageSize(env);
 
   for (;;) {
@@ -365,6 +366,10 @@ async function loadMailboxAccounts(env, group, loginAccount) {
       const currentId = Number(item.accountId || item.id || 0);
       if (candidate) {
         byEmail.set(candidate, item);
+        const domain = candidate.split("@")[1];
+        if (domain) {
+          domains.add(domain);
+        }
       }
       if (currentId > maxAccountId) {
         maxAccountId = currentId;
@@ -380,6 +385,7 @@ async function loadMailboxAccounts(env, group, loginAccount) {
 
   const snapshot = {
     byEmail,
+    domains,
     maxAccountId,
     expiresAt: Date.now() + getAccountCacheTtlMs(env),
   };
@@ -578,18 +584,48 @@ async function handleQueryCode(request, env) {
     let group = null;
     let account = null;
     let matchedLoginAccount = null;
+    const targetDomain = targetEmail.split("@")[1] || "";
+    const fallbackCandidates = [];
     for (const gatewayGroup of getGatewayGroups(env)) {
       for (const loginAccount of gatewayGroup.accounts) {
-        account = await findMailboxAccount(env, gatewayGroup, loginAccount, targetEmail);
-        if (account) {
+        const accountList = await loadMailboxAccounts(env, gatewayGroup, loginAccount);
+        const directMatch = accountList.byEmail.get(targetEmail) || null;
+        if (directMatch) {
           group = gatewayGroup;
           matchedLoginAccount = loginAccount;
+          account = directMatch;
           break;
+        }
+
+        if (
+          targetDomain &&
+          (accountList.domains.has(targetDomain) || gatewayGroup.accounts.length === 1)
+        ) {
+          fallbackCandidates.push({
+            gatewayGroup,
+            loginAccount,
+          });
         }
       }
 
       if (account) {
         break;
+      }
+    }
+
+    if (!account) {
+      for (const candidate of fallbackCandidates) {
+        account = await findMailboxAccount(
+          env,
+          candidate.gatewayGroup,
+          candidate.loginAccount,
+          targetEmail
+        );
+        if (account) {
+          group = candidate.gatewayGroup;
+          matchedLoginAccount = candidate.loginAccount;
+          break;
+        }
       }
     }
 
