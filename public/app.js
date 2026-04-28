@@ -1,11 +1,13 @@
 const form = document.getElementById("query-form");
+const pageShell = document.getElementById("page-shell");
 const emailInput = document.getElementById("email");
 const submitButton = document.getElementById("submit-button");
 const statusLine = document.getElementById("status");
 const statusExtra = document.getElementById("status-extra");
 const quickLink = document.getElementById("quick-link");
 const resultCard = document.getElementById("result");
-const resultCode = document.getElementById("result-code");
+const resultHtml = document.getElementById("result-html");
+const resultContent = document.getElementById("result-content");
 const resultSubject = document.getElementById("result-subject");
 const resultFrom = document.getElementById("result-from");
 const resultTime = document.getElementById("result-time");
@@ -78,9 +80,28 @@ function formatReceivedTime(value) {
   return formatShanghaiDate(date);
 }
 
+function isLikelyHtml(value) {
+  return /<html[\s>]|<body[\s>]|<head[\s>]|<div[\s>]|<table[\s>]|<p[\s>]|<br\s*\/?>/i.test(
+    String(value || "").trim()
+  );
+}
+
 function showResult(payload) {
+  pageShell.classList.add("has-result");
   resultCard.classList.remove("is-hidden");
-  resultCode.textContent = payload.code || "------";
+  const rawHtml = payload.latestEmail?.html || "";
+  const content = payload.latestEmail?.content || "邮件内容为空";
+  const html = rawHtml || (isLikelyHtml(content) ? content : "");
+  if (html) {
+    resultHtml.classList.remove("is-hidden");
+    resultContent.classList.add("is-hidden");
+    resultHtml.srcdoc = html;
+  } else {
+    resultHtml.classList.add("is-hidden");
+    resultHtml.srcdoc = "";
+    resultContent.classList.remove("is-hidden");
+    resultContent.textContent = content;
+  }
   resultSubject.textContent = payload.latestEmail?.subject || "无主题";
   resultFrom.textContent = payload.latestEmail?.from || "未知发件人";
   resultTime.textContent = formatReceivedTime(payload.latestEmail?.receivedAt);
@@ -89,7 +110,12 @@ function showResult(payload) {
 }
 
 function hideResult() {
+  pageShell.classList.remove("has-result");
   resultCard.classList.add("is-hidden");
+  resultHtml.classList.add("is-hidden");
+  resultHtml.srcdoc = "";
+  resultContent.classList.remove("is-hidden");
+  resultContent.textContent = "-";
   helperCopyDefault.classList.remove("is-hidden-inline");
   helperCopySuccess.classList.add("is-hidden-inline");
 }
@@ -107,7 +133,7 @@ form.addEventListener("submit", async (event) => {
   }
 
   setLoading(true);
-  setStatus("正在查询最新邮件并提取验证码...");
+  setStatus("正在查询最新邮件内容...");
   setStatusExtraVisible(false);
   setQuickLinkVisible(true);
   hideResult();
@@ -127,7 +153,7 @@ form.addEventListener("submit", async (event) => {
     }
 
     showResult(payload);
-    setStatus("验证码已提取。", "success");
+    setStatus("查询成功！", "success");
     setStatusExtraVisible(true);
     setQuickLinkVisible(false);
   } catch (error) {

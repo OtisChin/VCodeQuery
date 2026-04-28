@@ -1,12 +1,12 @@
 # ChatGPT 验证码查询
 
-一个用于查询 ChatGPT 登录验证码的网页工具。
+一个用于查询 ChatGPT 登录邮件内容的网页工具。
 
-用户输入邮箱地址后，系统会到你自有的邮箱中转站中查找对应邮箱账号，读取最新邮件，并尝试提取其中的验证码。项目同时提供本地 Node 运行方式和 Cloudflare Workers 部署方式。
+用户输入邮箱地址后，系统会到你自有的邮箱中转站中直接搜索该邮箱的最新收件邮件，并返回原始邮件内容。项目同时提供本地 Node 运行方式和 Cloudflare Workers 部署方式。
 
 ## 功能特性
 
-- 输入邮箱地址后查询最新验证码
+- 输入邮箱地址后直接查询对应邮箱的最新收件邮件
 - 自动从最新邮件内容中提取 4 到 8 位验证码
 - 简洁的单页查询界面
 - 支持本地运行
@@ -35,17 +35,14 @@
 
 1. 用户在页面输入邮箱地址
 2. 后端登录邮箱中转站 API
-3. 查询账号列表并匹配目标邮箱
-4. 读取该邮箱最新邮件
-5. 从邮件主题或内容中提取验证码
-6. 将结果返回到页面展示
+3. 直接调用原生 `/allEmail/list` 接口按邮箱地址搜索收件邮件
+4. 从返回结果中选出该邮箱的最新邮件
+5. 将原邮件内容返回到页面展示
 
 ## 已接入的邮箱中转站接口
 
 - `POST /login`
-- `GET /account/list`
-- `GET /email/list`
-- `GET /email/latest`
+- `GET /allEmail/list`
 
 ## 环境变量
 
@@ -61,12 +58,6 @@
   单个邮箱中转站登录密码，兼容旧配置
 - `MAIL_GATEWAY_BASE_URL`
   邮箱中转站 API 地址，默认值为 `https://mail.970410.xyz/api`
-- `MAIL_GATEWAY_ACCOUNT_LIST_PAGE_SIZE`
-  查询 `/account/list` 时每页拉取数量，默认 `1000`
-- `MAIL_GATEWAY_ACCOUNT_CACHE_TTL_MS`
-  账号列表缓存时间，单位毫秒，默认 `300000`
-- `MAIL_GATEWAY_FORWARD_PROBE_LIMIT`
-  当 `/account/list` 没命中时，仅向已知最大 `accountId` 之后继续探测的数量，默认 `20`
 - `PORT`
   本地 Node 服务端口，默认值为 `3000`
 
@@ -75,9 +66,8 @@
 - 本地 Node 版本支持自动读取项目根目录 `.env`
 - Cloudflare Workers 版本使用 `wrangler secret` 管理线上敏感配置
 - 当前前端页面为纯静态资源，由本地服务或 Workers 静态资源能力提供
-- 查询时会优先使用 `MAIL_GATEWAY_GROUPS` 中的中转站分组轮询匹配目标邮箱
-- 查询会缓存 `/account/list` 结果，减少重复请求
-- 如果目标邮箱不在 `/account/list` 返回结果中，只会向最新账号范围之后做少量前向探测，避免 Worker 触发过多 subrequests
+- 查询时会优先使用 `MAIL_GATEWAY_GROUPS` 中的中转站分组轮询
+- 系统会直接调用中转站原生 `/allEmail/list`，按邮箱地址搜索收件邮件，不再依赖账号列表完整性
 
 ## 运行与部署
 

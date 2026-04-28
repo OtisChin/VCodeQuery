@@ -17,16 +17,6 @@ const MAIL_GATEWAY_GROUPS = process.env.MAIL_GATEWAY_GROUPS || "";
 const MAIL_GATEWAY_ACCOUNTS = process.env.MAIL_GATEWAY_ACCOUNTS || "";
 const MAIL_GATEWAY_LOGIN_EMAIL = process.env.MAIL_GATEWAY_LOGIN_EMAIL || "";
 const MAIL_GATEWAY_PASSWORD = process.env.MAIL_GATEWAY_PASSWORD || "";
-const MAIL_GATEWAY_ACCOUNT_LIST_PAGE_SIZE = Number(
-  process.env.MAIL_GATEWAY_ACCOUNT_LIST_PAGE_SIZE || 1000
-);
-const MAIL_GATEWAY_ACCOUNT_CACHE_TTL_MS = Number(
-  process.env.MAIL_GATEWAY_ACCOUNT_CACHE_TTL_MS || 5 * 60 * 1000
-);
-const MAIL_GATEWAY_FORWARD_PROBE_LIMIT = Number(
-  process.env.MAIL_GATEWAY_FORWARD_PROBE_LIMIT || 20
-);
-
 const staticMimeTypes = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
@@ -40,8 +30,6 @@ const staticMimeTypes = {
 };
 
 const authCache = new Map();
-const mailboxAccountCache = new Map();
-const mailboxListCache = new Map();
 
 function loadDotEnv() {
   const envPath = path.join(__dirname, ".env");
@@ -50,31 +38,63 @@ function loadDotEnv() {
   }
 
   const content = fs.readFileSync(envPath, "utf8");
-  for (const line of content.split(/\r?\n/)) {
-    const trimmed = line.trim();
+  const lines = content.split(/\r?\n/);
+
+  for (let index = 0; index < lines.length; index++) {
+    const rawLine = lines[index];
+    const trimmed = rawLine.trim();
     if (!trimmed || trimmed.startsWith("#")) {
       continue;
     }
 
-    const separatorIndex = trimmed.indexOf("=");
+    const separatorIndex = rawLine.indexOf("=");
     if (separatorIndex <= 0) {
       continue;
     }
 
-    const key = trimmed.slice(0, separatorIndex).trim();
+    const key = rawLine.slice(0, separatorIndex).trim();
     if (!key || process.env[key] !== undefined) {
       continue;
     }
 
-    let value = trimmed.slice(separatorIndex + 1).trim();
-    if (
-      (value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
-      value = value.slice(1, -1);
+    let value = rawLine.slice(separatorIndex + 1).trim();
+    const quote = value.startsWith('"') ? '"' : value.startsWith("'") ? "'" : "";
+
+    if (quote) {
+      while (!value.endsWith(quote) && index + 1 < lines.length) {
+        index += 1;
+        value += `\n${lines[index]}`;
+      }
+      value = value.trim();
+      if (value.startsWith(quote) && value.endsWith(quote)) {
+        value = value.slice(1, -1);
+      }
+      process.env[key] = value;
+      continue;
     }
 
-    process.env[key] = value;
+    const openBrackets =
+      (value.match(/\[/g) || []).length - (value.match(/\]/g) || []).length;
+    const openBraces =
+      (value.match(/\{/g) || []).length - (value.match(/\}/g) || []).length;
+
+    if (openBrackets > 0 || openBraces > 0) {
+      let balanceBrackets = openBrackets;
+      let balanceBraces = openBraces;
+
+      while ((balanceBrackets > 0 || balanceBraces > 0) && index + 1 < lines.length) {
+        index += 1;
+        value += `\n${lines[index]}`;
+        balanceBrackets +=
+          (lines[index].match(/\[/g) || []).length -
+          (lines[index].match(/\]/g) || []).length;
+        balanceBraces +=
+          (lines[index].match(/\{/g) || []).length -
+          (lines[index].match(/\}/g) || []).length;
+      }
+    }
+
+    process.env[key] = value.trim();
   }
 }
 
@@ -249,192 +269,6 @@ function getAuthCacheKey(group, loginAccount) {
   return `${loginAccount.email}@@${group.baseUrl}`;
 }
 
-function getMailboxCacheKey(group, loginAccount, targetEmail) {
-  return `${getAuthCacheKey(group, loginAccount)}@@${targetEmail}`;
-}
-
-function getMailboxListCacheKey(group, loginAccount) {
-  return getAuthCacheKey(group, loginAccount);
-}
-
-function getAccountListPageSize() {
-  if (!Number.isFinite(MAIL_GATEWAY_ACCOUNT_LIST_PAGE_SIZE)) {
-    return 1000;
-  }
-
-  return Math.max(50, Math.floor(MAIL_GATEWAY_ACCOUNT_LIST_PAGE_SIZE));
-}
-
-function getAccountCacheTtlMs() {
-  if (!Number.isFinite(MAIL_GATEWAY_ACCOUNT_CACHE_TTL_MS)) {
-    return 5 * 60 * 1000;
-  }
-
-  return Math.max(30 * 1000, Math.floor(MAIL_GATEWAY_ACCOUNT_CACHE_TTL_MS));
-}
-
-function getForwardProbeLimit() {
-  if (!Number.isFinite(MAIL_GATEWAY_FORWARD_PROBE_LIMIT)) {
-    return 20;
-  }
-
-  return Math.max(0, Math.floor(MAIL_GATEWAY_FORWARD_PROBE_LIMIT));
-}
-
-function rememberMailboxAccount(group, loginAccount, targetEmail, account) {
-  if (!account) {
-    return;
-  }
-
-  mailboxAccountCache.set(
-    getMailboxCacheKey(group, loginAccount, targetEmail),
-    account
-  );
-}
-
-function getRememberedMailboxAccount(group, loginAccount, targetEmail) {
-  return (
-    mailboxAccountCache.get(
-      getMailboxCacheKey(group, loginAccount, targetEmail)
-    ) || null
-  );
-}
-
-async function findMailboxByLatestEmail(group, loginAccount, targetEmail) {
-  const cachedList = mailboxListCache.get(getMailboxListCacheKey(group, loginAccount));
-  const maxKnownAccountId = Number(cachedList?.maxAccountId || 0);
-  const probeLimit = getForwardProbeLimit();
-
-  if (!maxKnownAccountId || probeLimit === 0) {
-    return null;
-  }
-
-  for (let offset = 1; offset <= probeLimit; offset++) {
-    const id = maxKnownAccountId + offset;
-    try {
-      const emails = await gatewayFetch(
-        group,
-        loginAccount,
-        `/email/latest?emailId=0&accountId=${id}`
-      );
-      const items = Array.isArray(emails) ? emails : [];
-      if (items.length === 0) {
-        continue;
-      }
-
-      const latestEmail = items[0];
-      const toEmail = String(
-        latestEmail.toEmail || latestEmail.toAddress || ""
-      )
-        .trim()
-        .toLowerCase();
-      if (toEmail === targetEmail) {
-        return { accountId: id, email: toEmail };
-      }
-    } catch {
-      continue;
-    }
-  }
-
-  return null;
-}
-
-async function loadMailboxAccounts(group, loginAccount) {
-  const cacheKey = getMailboxListCacheKey(group, loginAccount);
-  const cacheItem = mailboxListCache.get(cacheKey);
-  if (cacheItem && cacheItem.expiresAt > Date.now()) {
-    return cacheItem;
-  }
-
-  let accountId = 0;
-  let maxAccountId = 0;
-  const byEmail = new Map();
-  const domains = new Set();
-  const pageSize = getAccountListPageSize();
-
-  for (;;) {
-    const page = await gatewayFetch(
-      group,
-      loginAccount,
-      `/account/list?accountId=${accountId}&size=${pageSize}`
-    );
-    const items = Array.isArray(page) ? page : [];
-
-    if (items.length === 0) {
-      break;
-    }
-
-    for (const item of items) {
-      const candidate = String(item.email || item.address || "")
-        .trim()
-        .toLowerCase();
-      const currentId = Number(item.accountId || item.id || 0);
-      if (candidate) {
-        byEmail.set(candidate, item);
-        const domain = candidate.split("@")[1];
-        if (domain) {
-          domains.add(domain);
-        }
-      }
-      if (currentId > maxAccountId) {
-        maxAccountId = currentId;
-      }
-    }
-
-    const lastItem = items[items.length - 1];
-    accountId = Number(lastItem.accountId || lastItem.id || 0);
-    if (!accountId || items.length < pageSize) {
-      break;
-    }
-  }
-
-  const snapshot = {
-    byEmail,
-    domains,
-    maxAccountId,
-    expiresAt: Date.now() + getAccountCacheTtlMs(),
-  };
-  mailboxListCache.set(cacheKey, snapshot);
-  return snapshot;
-}
-
-async function findMailboxByRecentWindow(group, loginAccount, targetEmail, windowSize = 200) {
-  const accountList = await loadMailboxAccounts(group, loginAccount);
-  const maxKnownAccountId = Number(accountList.maxAccountId || 0);
-  if (!maxKnownAccountId) {
-    return null;
-  }
-
-  const startId = Math.max(1, maxKnownAccountId - windowSize + 1);
-  for (let id = startId; id <= maxKnownAccountId; id++) {
-    try {
-      const emails = await gatewayFetch(
-        group,
-        loginAccount,
-        `/email/latest?emailId=0&accountId=${id}`
-      );
-      const items = Array.isArray(emails) ? emails : [];
-      if (items.length === 0) {
-        continue;
-      }
-
-      const latestEmail = items[0];
-      const toEmail = String(
-        latestEmail.toEmail || latestEmail.toAddress || ""
-      )
-        .trim()
-        .toLowerCase();
-      if (toEmail === targetEmail) {
-        return { accountId: id, email: toEmail };
-      }
-    } catch {
-      continue;
-    }
-  }
-
-  return null;
-}
-
 async function gatewayFetch(group, loginAccount, pathname, options = {}, allowRetry = true) {
   const token = await getGatewayToken(group, loginAccount);
   const response = await fetch(`${group.baseUrl}${pathname}`, {
@@ -511,48 +345,6 @@ async function getGatewayToken(group, loginAccount) {
   return body.data.token;
 }
 
-async function findMailboxAccount(group, loginAccount, targetEmail) {
-  const remembered = getRememberedMailboxAccount(group, loginAccount, targetEmail);
-  if (remembered) {
-    return remembered;
-  }
-
-  const accountList = await loadMailboxAccounts(group, loginAccount);
-  const found = accountList.byEmail.get(targetEmail) || null;
-
-  if (found) {
-    rememberMailboxAccount(group, loginAccount, targetEmail, found);
-    return found;
-  }
-
-  const fallbackMatch = await findMailboxByLatestEmail(
-    group,
-    loginAccount,
-    targetEmail
-  );
-  if (fallbackMatch) {
-    rememberMailboxAccount(group, loginAccount, targetEmail, fallbackMatch);
-    return fallbackMatch;
-  }
-
-  const recentWindowMatch = await findMailboxByRecentWindow(
-    group,
-    loginAccount,
-    targetEmail
-  );
-  if (recentWindowMatch) {
-    rememberMailboxAccount(
-      group,
-      loginAccount,
-      targetEmail,
-      recentWindowMatch
-    );
-    return recentWindowMatch;
-  }
-
-  return null;
-}
-
 function parseTimestamp(value) {
   if (typeof value === "number" && Number.isFinite(value)) {
     return value;
@@ -595,47 +387,245 @@ function pickLatestEmail(items) {
   })[0];
 }
 
-function collectCandidateText(email) {
-  const preferredFields = [
-    email.subject,
-    email.text,
-    email.content,
-    email.message,
-    email.html,
-    email.body,
-  ];
-
-  return preferredFields
-    .filter((value) => typeof value === "string" && value.trim())
-    .join("\n");
+function decodeHtmlEntities(text) {
+  return text
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'");
 }
 
-function extractVerificationCode(text) {
-  const normalized = text.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-  const priorityPatterns = [
-    /(?:验证码|verification code|security code|confirm(?:ation)? code|otp|one-time password)[^\d]{0,20}(\d{4,8})/i,
-    /(\d{6})(?!\d)/,
-    /(\d{4,8})(?!\d)/,
-    /\b([A-Z0-9]{4,8})\b/,
-  ];
+function htmlToPlainText(html) {
+  return decodeHtmlEntities(
+    String(html || "")
+      .replace(/<style[\s\S]*?<\/style>/gi, " ")
+      .replace(/<script[\s\S]*?<\/script>/gi, " ")
+      .replace(/<br\s*\/?>/gi, "\n")
+      .replace(/<\/p>/gi, "\n\n")
+      .replace(/<\/div>/gi, "\n")
+      .replace(/<\/tr>/gi, "\n")
+      .replace(/<\/td>/gi, " ")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\r/g, "")
+      .replace(/[ \t]+\n/g, "\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .replace(/[ \t]{2,}/g, " ")
+      .trim()
+  );
+}
 
-  for (const pattern of priorityPatterns) {
-    const match = normalized.match(pattern);
-    if (match?.[1]) {
-      return match[1];
+function isLikelyJsonText(value) {
+  const text = String(value || "").trim();
+  return (
+    (text.startsWith("{") && text.endsWith("}")) ||
+    (text.startsWith("[") && text.endsWith("]"))
+  );
+}
+
+function isLikelyHtmlText(value) {
+  const text = String(value || "").trim();
+  return /<html[\s>]|<body[\s>]|<head[\s>]|<div[\s>]|<table[\s>]|<p[\s>]|<br\s*\/?>/i.test(
+    text
+  );
+}
+
+function extractTextFromStructuredContent(value) {
+  if (!isLikelyJsonText(value)) {
+    return "";
+  }
+
+  try {
+    const parsed = JSON.parse(value);
+    const candidates = [
+      parsed?.text,
+      parsed?.content,
+      parsed?.html,
+      parsed?.body,
+      parsed?.message,
+      Array.isArray(parsed?.blocks)
+        ? parsed.blocks
+            .map((item) => item?.text || item?.content || item?.html || "")
+            .filter(Boolean)
+            .join("\n")
+        : "",
+    ];
+
+    for (const candidate of candidates) {
+      if (typeof candidate === "string" && candidate.trim()) {
+        if (candidate.includes("<")) {
+          return htmlToPlainText(candidate);
+        }
+        return candidate.trim();
+      }
+    }
+  } catch {
+    return "";
+  }
+
+  return "";
+}
+
+function extractHtmlFromStructuredContent(value) {
+  if (!isLikelyJsonText(value)) {
+    return "";
+  }
+
+  try {
+    const parsed = JSON.parse(value);
+    const candidates = [
+      parsed?.html,
+      parsed?.content,
+      Array.isArray(parsed?.blocks)
+        ? parsed.blocks
+            .map((item) => item?.html || item?.content || "")
+            .filter((item) => typeof item === "string" && item.includes("<"))
+            .join("\n")
+        : "",
+    ];
+
+    for (const candidate of candidates) {
+      if (typeof candidate === "string" && candidate.trim() && candidate.includes("<")) {
+        return candidate.trim();
+      }
+    }
+  } catch {
+    return "";
+  }
+
+  return "";
+}
+
+function collectEmailContent(email) {
+  const plainFields = [email.text, email.message, email.body];
+  for (const field of plainFields) {
+    if (typeof field === "string" && field.trim()) {
+      return field.trim();
     }
   }
 
-  return null;
+  if (typeof email.html === "string" && email.html.trim()) {
+    return htmlToPlainText(email.html);
+  }
+
+  if (typeof email.content === "string" && email.content.trim()) {
+    const structuredText = extractTextFromStructuredContent(email.content);
+    if (structuredText) {
+      return structuredText;
+    }
+
+    if (isLikelyHtmlText(email.content)) {
+      return htmlToPlainText(email.content);
+    }
+
+    if (!isLikelyJsonText(email.content)) {
+      return email.content.trim();
+    }
+  }
+
+  return "";
+}
+
+function collectEmailHtml(email) {
+  const htmlFields = [email.html];
+  for (const field of htmlFields) {
+    if (typeof field === "string" && field.trim()) {
+      return field.trim();
+    }
+  }
+
+  if (typeof email.content === "string" && email.content.trim()) {
+    const structuredHtml = extractHtmlFromStructuredContent(email.content);
+    if (structuredHtml) {
+      return structuredHtml;
+    }
+
+    if (isLikelyHtmlText(email.content)) {
+      return email.content.trim();
+    }
+  }
+
+  return "";
+}
+
+function collectEmailFrom(email) {
+  const name = String(email.fromName || email.name || "").trim();
+  const address = String(email.fromEmail || email.sendEmail || email.from || "").trim();
+
+  if (name && address) {
+    return `${name} <${address}>`;
+  }
+
+  return address || name || "";
+}
+
+async function searchLatestEmailByAddress(group, loginAccount, targetEmail) {
+  const query = new URLSearchParams({
+    accountEmail: targetEmail,
+    type: "receive",
+    size: "20",
+    timeSort: "0",
+  });
+  const data = await gatewayFetch(
+    group,
+    loginAccount,
+    `/allEmail/list?${query.toString()}`
+  );
+  const items = Array.isArray(data?.list) ? data.list : [];
+  const exactMatches = items.filter((item) => {
+    const candidate = String(item.toEmail || item.toAddress || "")
+      .trim()
+      .toLowerCase();
+    return candidate === targetEmail;
+  });
+
+  if (exactMatches.length === 0) {
+    return null;
+  }
+
+  return pickLatestEmail(exactMatches);
+}
+
+async function findAccountByEmail(group, loginAccount, targetEmail) {
+  let accountId = 0;
+
+  for (;;) {
+    const items = await gatewayFetch(
+      group,
+      loginAccount,
+      `/account/list?accountId=${accountId}&size=1000`
+    );
+    const list = Array.isArray(items) ? items : [];
+    if (list.length === 0) {
+      return null;
+    }
+
+    const matched = list.find((item) => {
+      const email = String(item.email || item.address || "")
+        .trim()
+        .toLowerCase();
+      return email === targetEmail;
+    });
+    if (matched) {
+      return matched;
+    }
+
+    const lastItem = list[list.length - 1];
+    accountId = Number(lastItem.accountId || lastItem.id || 0);
+    if (!accountId || list.length < 1000) {
+      return null;
+    }
+  }
 }
 
 async function fetchLatestEmailForAccount(group, loginAccount, accountId) {
-  const attempts = [
+  const endpoints = [
     `/email/list?accountId=${accountId}&emailId=0&timeSort=0&size=10&type=0`,
     `/email/latest?emailId=0&accountId=${accountId}`,
   ];
 
-  for (const endpoint of attempts) {
+  for (const endpoint of endpoints) {
     const data = await gatewayFetch(group, loginAccount, endpoint);
     const items = Array.isArray(data) ? data : [];
     if (items.length > 0) {
@@ -661,77 +651,55 @@ async function handleQueryCode(req, res) {
       return;
     }
 
-    let group = null;
-    let account = null;
-    let matchedLoginAccount = null;
-    const targetDomain = targetEmail.split("@")[1] || "";
-    const fallbackCandidates = [];
+    let latestEmail = null;
     for (const gatewayGroup of getGatewayGroups()) {
       for (const loginAccount of gatewayGroup.accounts) {
-        const accountList = await loadMailboxAccounts(gatewayGroup, loginAccount);
-        const directMatch = accountList.byEmail.get(targetEmail) || null;
-        if (directMatch) {
-          group = gatewayGroup;
-          matchedLoginAccount = loginAccount;
-          account = directMatch;
-          break;
-        }
-
-        if (
-          targetDomain &&
-          (accountList.domains.has(targetDomain) || gatewayGroup.accounts.length === 1)
-        ) {
-          fallbackCandidates.push({
+        try {
+          latestEmail = await searchLatestEmailByAddress(
             gatewayGroup,
             loginAccount,
-          });
+            targetEmail
+          );
+          if (!latestEmail) {
+            const account = await findAccountByEmail(
+              gatewayGroup,
+              loginAccount,
+              targetEmail
+            );
+            if (account) {
+              latestEmail = await fetchLatestEmailForAccount(
+                gatewayGroup,
+                loginAccount,
+                account.accountId || account.id
+              );
+            }
+          }
+        } catch {
+          latestEmail = null;
+        }
+
+        if (latestEmail) {
+          break;
         }
       }
 
-      if (account) {
+      if (latestEmail) {
         break;
       }
     }
 
-    if (!account) {
-      for (const candidate of fallbackCandidates) {
-        account = await findMailboxAccount(
-          candidate.gatewayGroup,
-          candidate.loginAccount,
-          targetEmail
-        );
-        if (account) {
-          group = candidate.gatewayGroup;
-          matchedLoginAccount = candidate.loginAccount;
-          break;
-        }
-      }
-    }
-
-    if (!group || !account || !matchedLoginAccount) {
+    if (!latestEmail) {
       sendJson(res, 404, { error: "查询失败，请检查邮箱是否正确" });
       return;
     }
 
-    const latestEmail = await fetchLatestEmailForAccount(
-      group,
-      matchedLoginAccount,
-      account.accountId || account.id
-    );
-    if (!latestEmail) {
-      sendJson(res, 404, { error: "该邮箱还没有收到邮件。" });
-      return;
-    }
-
-    const sourceText = collectCandidateText(latestEmail);
-    const code = extractVerificationCode(sourceText);
-
-    if (!code) {
+    const sourceText = collectEmailContent(latestEmail);
+    if (!sourceText) {
       sendJson(res, 404, {
-        error: "找到了最新邮件，但没有识别出验证码。",
+        error: "找到了最新邮件，但邮件内容为空。",
         latestEmail: {
           subject: latestEmail.subject || "",
-          from: latestEmail.fromName || latestEmail.fromEmail || "",
+          from: collectEmailFrom(latestEmail),
           receivedAt:
             latestEmail.createTime ||
             latestEmail.createdAt ||
@@ -744,16 +712,17 @@ async function handleQueryCode(req, res) {
     }
 
     sendJson(res, 200, {
-      code,
       latestEmail: {
         subject: latestEmail.subject || "",
-        from: latestEmail.fromName || latestEmail.fromEmail || "",
+        from: collectEmailFrom(latestEmail),
         receivedAt:
           latestEmail.createTime ||
           latestEmail.createdAt ||
           latestEmail.receivedAt ||
           latestEmail.date ||
           "",
+        content: sourceText,
+        html: collectEmailHtml(latestEmail),
       },
     });
   } catch (error) {

@@ -110,6 +110,16 @@ npx wrangler secret put MAIL_GATEWAY_BASE_URL
 https://mail.970410.xyz/api
 ```
 
+注意：
+
+- `MAIL_GATEWAY_GROUPS` 必须是一整行合法 JSON，不能带换行缩进后直接粘进 secret 输入框
+- Cloudflare `wrangler secret put` 时，只输入纯 JSON 值，不要带 `MAIL_GATEWAY_GROUPS=` 前缀
+- 例如正确输入内容是：
+
+```json
+[{"baseUrl":"https://email.external.cc.cd/api","accounts":[{"email":"admin@external.cc.cd","password":"qaz558023"}]},{"baseUrl":"https://mail.970410.xyz/api","accounts":[{"email":"chen.mo@886178.xyz","password":"qaz558023"},{"email":"488768953@886178.xyz","password":"qaz558023"}]}]
+```
+
 ### 4. 本地预览 Worker
 
 ```powershell
